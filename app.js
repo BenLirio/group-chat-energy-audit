@@ -122,6 +122,49 @@ const ROLES = [
   }
 ];
 
+// --------- URL fragment state (shareable permalink) ----------
+// Encode the inputs (not the output) into location.hash so a shared link
+// reproduces the whole report for the recipient. The AI flourish may vary,
+// but the role/hazard/case# are deterministic from the inputs.
+function b64urlEncode(obj) {
+  const json = JSON.stringify(obj);
+  const bytes = new TextEncoder().encode(json);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64urlDecode(str) {
+  try {
+    let s = str.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const bin = atob(s);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch (_) {
+    return null;
+  }
+}
+function encodeFragment(name, chips, messages) {
+  return '#a=' + b64urlEncode({ n: name, c: chips, m: messages });
+}
+function decodeFragment() {
+  const frag = location.hash || '';
+  const m = frag.match(/^#a=([A-Za-z0-9_-]+)$/);
+  if (!m) return null;
+  const val = b64urlDecode(m[1]);
+  if (!val || typeof val !== 'object') return null;
+  const name = typeof val.n === 'string' ? val.n : '';
+  const chips = Array.isArray(val.c) ? val.c.filter(x => typeof x === 'string') : [];
+  const messages = Array.isArray(val.m) ? val.m.filter(x => typeof x === 'string') : [];
+  if (!name) return null;
+  if (chips.length === 0 && messages.length === 0) return null;
+  return { name, chips, messages };
+}
+function stripFragment() {
+  history.replaceState(null, '', location.pathname + location.search);
+}
+
 // --------- Helpers ----------
 function hashStr(str) {
   let h = 0;
@@ -377,6 +420,28 @@ function fallbackFinding(role, source, i) {
 }
 
 // --------- Flow ----------
+async function runAuditWith(name, chips, messages, { updateFragment = true } = {}) {
+  const seed = hashStr(name.toLowerCase() + '|' + chips.join(',').toLowerCase() + '|' + messages.join('\n').toLowerCase());
+  const role = pickRole(name, chips, messages.join('\n'));
+
+  showLoading();
+
+  // minimum 800ms of loading for drama
+  const t0 = Date.now();
+  const { notes, citations } = await generateFindings(role, name, chips, messages, seed);
+  const elapsed = Date.now() - t0;
+  if (elapsed < 800) await new Promise(r => setTimeout(r, 800 - elapsed));
+
+  hideLoading();
+  renderReport({ subject: name, role, citations, notes, seed, chips, messages });
+  $('#share').style.display = 'flex';
+
+  // Make the result a permalink: share this URL and the recipient sees the same report.
+  if (updateFragment) {
+    history.replaceState(null, '', location.pathname + location.search + encodeFragment(name, chips, messages));
+  }
+}
+
 async function runAudit(ev) {
   ev && ev.preventDefault();
   const name = $('#subjectName').value.trim();
@@ -393,23 +458,11 @@ async function runAudit(ev) {
     return;
   }
 
-  const seed = hashStr(name.toLowerCase() + '|' + chips.join(',').toLowerCase() + '|' + messages.join('\n').toLowerCase());
-  const role = pickRole(name, chips, messages.join('\n'));
-
-  showLoading();
-
-  // minimum 800ms of loading for drama
-  const t0 = Date.now();
-  const { notes, citations } = await generateFindings(role, name, chips, messages, seed);
-  const elapsed = Date.now() - t0;
-  if (elapsed < 800) await new Promise(r => setTimeout(r, 800 - elapsed));
-
-  hideLoading();
-  renderReport({ subject: name, role, citations, notes, seed, chips, messages });
-  $('#share').style.display = 'flex';
+  await runAuditWith(name, chips, messages);
 }
 
 function resetAudit() {
+  stripFragment();
   $('#reportWrap').hidden = true;
   $('#intake').hidden = false;
   $('#formError').hidden = true;
@@ -471,6 +524,18 @@ function injectInkFilter() {
   document.body.appendChild(svg);
 }
 
+function prefillForm({ name, chips, messages }) {
+  $('#subjectName').value = name || '';
+  const ta = $('#messages');
+  ta.value = (messages || []).join('\n');
+  $('#msgCount').textContent = ta.value.length;
+  const wanted = new Set(chips || []);
+  document.querySelectorAll('.chip').forEach(btn => {
+    if (wanted.has(btn.dataset.chip)) btn.classList.add('on');
+    else btn.classList.remove('on');
+  });
+}
+
 // --------- Init ----------
 document.addEventListener('DOMContentLoaded', () => {
   renderChips();
@@ -486,4 +551,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const link = document.getElementById('ctaLink');
   if (link) link.href = location.pathname;
+
+  // Deep-link replay: if the URL has a valid #a=... fragment, pre-fill and re-run.
+  const fromFragment = decodeFragment();
+  if (fromFragment) {
+    prefillForm(fromFragment);
+    // Do not overwrite the incoming fragment — it is already correct.
+    runAuditWith(fromFragment.name, fromFragment.chips, fromFragment.messages, { updateFragment: false });
+  }
 });
