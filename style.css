@@ -15,6 +15,10 @@
 
 * { box-sizing: border-box; }
 
+/* Ensure the native hidden attribute always wins over class-level display rules
+   (e.g. .report-wrap { display: grid }), so sections marked [hidden] stay hidden. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
